@@ -42,5 +42,5 @@ $ cmake .
 $ make
 ```
 If you have any problems with compilation, please view this file (with exact steps to build it on fresh Ubuntu):
-[main.yml](https://github.com/mic0777/AudioAnalyzer/blob/9fb64113b24cca342cbe4f8a9947d1a4742655d3/.github/workflows/main.yml)
+[main.yml](https://github.com/mic0777/AudioAnalyzer/blob/9d480adf7081de81367e98f5fe166d2dacc77264/.github/workflows/main.yml)
 
