@@ -1,0 +1,41 @@
+name: build
+on:
+  push:
+  schedule:
+    - cron: '0 0 * * *'
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            libswresample-dev libavformat-dev libavutil-dev libavcodec-dev \
+            cmake catch2 libfftw3-dev
+      - name: Build libkeyfinder
+        run: |
+          git clone https://github.com/mixxxdj/libkeyfinder keyfinder
+          cd keyfinder
+          cmake -S . -B build
+          cmake --build build
+          sudo cmake --install build
+          cd ..
+          mkdir include
+          cp keyfinder/src/*.h include
+      - name: Build aubio
+        run: |
+          git clone https://github.com/aubio/aubio aubio
+          cd aubio
+          make
+          sudo make install DESTDIR=/
+          
+      - name: Build AudioAnalyzer
+        run: |
+          cmake -DCMAKE_FIND_DEBUG_MODE=1 .
+          make
