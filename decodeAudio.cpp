@@ -27,26 +27,28 @@ struct MemoryAVFormat {
     size_t audio_offset;
 
     MemoryAVFormat(std::vector<char> & compressed_audio)
-    : fmt_ctx(avformat_alloc_context(), [](AVFormatContext* p) {avformat_close_input(&p);}),
+    :
       io_ctx(nullptr),
       compressed_audio(compressed_audio),
-      audio_offset(0) {
-        if (fmt_ctx == nullptr)
-            throw std::runtime_error("Failed to allocate context");
-
+      audio_offset(0)
+    {
         create_audio_buffer_io_context();
 
-        fmt_ctx->pb = io_ctx.get();
-        fmt_ctx->flags |= AVFMT_FLAG_CUSTOM_IO;
+        AVFormatContext *avFormatPtr = avformat_alloc_context();
+        if (!avFormatPtr)
+            throw std::runtime_error("Failed to allocate context");
+        avFormatPtr->pb = io_ctx.get();
+        avFormatPtr->flags |= AVFMT_FLAG_CUSTOM_IO;
 
-        auto avFormatPtr = fmt_ctx.get();
         int err = avformat_open_input(&avFormatPtr, "nullptr", nullptr, nullptr);
-        if (err != 0 || !avFormatPtr)
-            std::runtime_error("Error configuring context from audio buffer:" + std::to_string(err));
+        if (err != 0 || !avFormatPtr) {
+            throw std::runtime_error("Error configuring context from audio buffer:" + std::to_string(err));
+        }
+        fmt_ctx = std::shared_ptr<AVFormatContext>(avFormatPtr, [](AVFormatContext* p) {if (p) avformat_close_input(&p);});
 
         // find codec
         if (avformat_find_stream_info(avFormatPtr, nullptr) < 0) {
-                throw(std::runtime_error("Cannot find stream information"));
+                throw std::runtime_error("Cannot find stream information");
         }
 
         open_codec_context();
@@ -152,10 +154,7 @@ void decodePacket(AVCodecContext *ctx, AVPacket *pkt, AVFrame *frame, std::vecto
     // send the packet with the compressed data to the decoder
     int ret = avcodec_send_packet(ctx, pkt);
     if (ret < 0) {
-        if (isLast) {
-            return;  // it's OK, maybe some padding at the end
-        }
-        throw std::runtime_error("Error submitting the packet to the decoder");
+        return;  // skip bad packets but continue
     }
 
     // read all the output frames (in general there may be any number of them)
@@ -164,39 +163,78 @@ void decodePacket(AVCodecContext *ctx, AVPacket *pkt, AVFrame *frame, std::vecto
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
             return;
         else if (ret < 0) {
-            throw std::runtime_error("Error during decoding\n");
+            if (isLast) {
+                return;  // it's OK, maybe some padding at the end
+            }
+	    throw std::runtime_error("Error during decoding\n");
         }
         size_t sampleSize = av_get_bytes_per_sample(ctx->sample_fmt);
         bool planar{!!av_sample_fmt_is_planar(ctx->sample_fmt)};
+
         if (planar) {
+            size_t len = resultBuf.size();
+            resultBuf.resize(len + frame->nb_samples);
             for (size_t i = 0; i < frame->nb_samples; i++) {
-                // store only first channel if stereo:
-                size_t len = resultBuf.size();
-                resultBuf.resize(len + 1);
-                if (sampleSize == 4) {
-                    memcpy(resultBuf.data() + len, frame->data[0] + sampleSize*i, sampleSize);
-                }else {  // resample
-                    *(resultBuf.data()+len) = float(*(reinterpret_cast<int16_t*>(frame->data[0]) + i));
+                // store only first channel if stereo:                
+                switch (ctx->sample_fmt) {
+                case AV_SAMPLE_FMT_S16P: {
+                    *(resultBuf.data()+len+i) = float(*(reinterpret_cast<int16_t*>(frame->data[0]) + i));
+                    break;
+                }
+                case AV_SAMPLE_FMT_S32P: {
+                    const float recip = 1.0 / (32768.0*65536.0);
+                    *(resultBuf.data()+len + i) = float(*(reinterpret_cast<int32_t*>(frame->data[0]) + i)) * recip;
+                    break;
+                }
+                case AV_SAMPLE_FMT_FLTP: { // float 32 bit samples
+                    *(resultBuf.data()+len + i) = *(reinterpret_cast<float*>(frame->data[0]) + i);
+                    break;
+                }
+                default: throw std::runtime_error("Sample format not supported");
                 }
             }
         }else {  // interleaved
             size_t len = resultBuf.size();
             resultBuf.resize(len + frame->nb_samples);
             if (frame->channels == 1) {
-                if (sampleSize == 4) {  // float 32 bit samples
-                    memcpy(resultBuf.data() + len, frame->data[0], frame->nb_samples * frame->channels * sampleSize);
-                }else {  // resample:
+                switch (ctx->sample_fmt) {
+                case AV_SAMPLE_FMT_S16: {
                     for (int i = 0; i < frame->nb_samples; i++) {
                         *(resultBuf.data()+len + i) = float(*(reinterpret_cast<int16_t*>(frame->data[0]) + i*ctx->channels));
                     }
+                    break;
+                    }
+                case AV_SAMPLE_FMT_S32: {
+                    const float recip = 1.0 / (32768.0*65536.0);
+                    for (int i = 0; i < frame->nb_samples; i++) {
+                        *(resultBuf.data()+len + i) = float(*(reinterpret_cast<int32_t*>(frame->data[0]) + i)) * recip;
+                    }
+                    break;
+                }
+                case AV_SAMPLE_FMT_FLT: { // float 32 bit samples
+                    memcpy(resultBuf.data() + len, frame->data[0], frame->nb_samples * frame->channels * sampleSize);
+                    break;
+                }
+                default: throw std::runtime_error("Sample format not supported");
                 }
             }else {
                 // store only first channel if stereo:
                 for (int i = 0; i < frame->nb_samples; i++) {
-                    if (sampleSize == 4) {  // float 32 bit samples
-                        *(resultBuf.data()+len + i*2) = *(reinterpret_cast<float*>(frame->data[0]) + i);
-                    }else {  // resample
-                        *(resultBuf.data()+len + i*2) = float(*(reinterpret_cast<int16_t*>(frame->data[0]) + i));
+                    switch (ctx->sample_fmt) {
+                    case AV_SAMPLE_FMT_S16: {
+                        *(resultBuf.data()+len + i) = float(*(reinterpret_cast<int16_t*>(frame->data[0]) + i));
+                        break;
+                        }
+                    case AV_SAMPLE_FMT_S32: {
+                        const float recip = 1.0 / (32768.0*65536.0);
+                        *(resultBuf.data()+len + i) = float(*(reinterpret_cast<int32_t*>(frame->data[0]) + i)) * recip;
+                        break;
+                    }
+                    case AV_SAMPLE_FMT_FLT: { // float 32 bit samples
+                        *(resultBuf.data()+len + i) = *(reinterpret_cast<float*>(frame->data[0]) + i);
+                        break;
+                    }
+                    default: throw std::runtime_error("Sample format not supported");
                     }
                 }
             }
@@ -213,11 +251,11 @@ void decodePacket(AVCodecContext *ctx, AVPacket *pkt, AVFrame *frame, std::vecto
   if source file was stereo, only first channel is returned
  *
  */
-std::tuple<std::vector<float>, int64_t, unsigned> decodeAudio(std::vector<char> &compressedBuf)
+std::tuple<std::vector<float>, int64_t, unsigned, unsigned, unsigned> decodeAudio(std::vector<char> &compressedBuf)
 {
     std::vector<float> resultWav;
     if (compressedBuf.size() == 0) {
-        return {std::move(resultWav), 0, 0};
+        return {std::move(resultWav), 0, 0, 0, 0};
     }
     MemoryAVFormat av(compressedBuf);
     // decode audio data:
@@ -227,8 +265,9 @@ std::tuple<std::vector<float>, int64_t, unsigned> decodeAudio(std::vector<char> 
     while (int ret=av_read_frame(av.fmt_ctx.get(), packet.get()) >= 0) {
             // check if the packet belongs to a stream we are interested in, otherwise
             // skip it
-            if (packet->stream_index == av.audioStreamIndex)
+            if (packet->stream_index == av.audioStreamIndex) {
                 decodePacket(av.codec_ctx.get(), packet.get(), decoded_frame.get(), resultWav, av.is_eof());
+            }
             av_packet_unref(packet.get());
         }
 
@@ -237,7 +276,8 @@ std::tuple<std::vector<float>, int64_t, unsigned> decodeAudio(std::vector<char> 
 
     int n_channels = av.codec_ctx->channels; // // c->ch_layout.nb_channels
     int sample_rate = av.codec_ctx->sample_rate;
+    int bit_rate = av.codec_ctx->bit_rate;
     int64_t duration = av.fmt_ctx->duration;
 
-    return {std::move(resultWav), duration, sample_rate};
+    return {std::move(resultWav), duration, sample_rate, n_channels, bit_rate};
 }

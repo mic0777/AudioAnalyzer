@@ -50,7 +50,7 @@ string Worker::detectTempo(std::vector<float> &wav)
       // execute tempo
       aubio_tempo_do(o.get(), in.get(), out.get());
       // do something with the beats
-      if (out->data[0] != 0 /*&&  aubio_tempo_get_confidence(o)>0.4*/) {
+      if (out->data[0] != 0.0 /*&&  aubio_tempo_get_confidence(o)>0.4*/) {
           beats.push_back(aubio_tempo_get_last_s(o.get()));
           conf.push_back(aubio_tempo_get_confidence(o.get()));
           bpms_.push_back(aubio_tempo_get_bpm(o.get()));
@@ -176,5 +176,5 @@ string Worker::detectKey(std::vector<float> &wavData)
 
 void Worker::writeToCSV(string &key, string &tempo)
 {
-    ofStream << songName << "," << duration << "," << frequency << key << "," << tempo << endl;
+    ofStream << songName << "," << duration << "," << frequency << "," << key << "," << tempo << "\n";
 }
